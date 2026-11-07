@@ -1,5 +1,6 @@
 'use strict';
-const KEY='milo-admin-v1';
+let KEY=''; // Loaded after server verifies the current cashier account
+// Auth and devices are controlled by Google Apps Script; no secrets in these files.
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>new Intl.NumberFormat('ar-SA',{style:'currency',currency:'SAR',maximumFractionDigits:2}).format(Number(v)||0);
@@ -15,10 +16,16 @@ const schema={
  tasks:{title:'المهام والمتابعة',description:'توزيع المهام ومتابعة الإنجاز.',icon:'☑',fields:[['title','عنوان المهمة','text',true],['assigned','المسؤول','text'],['priority','الأولوية','select',true,['عالية','متوسطة','منخفضة']],['due','تاريخ الاستحقاق','date'],['status','الحالة','select',true,['جديدة','قيد التنفيذ','مكتملة']],['notes','تفاصيل المهمة','textarea']]},
  invoices:{title:'الفواتير والمبيعات',description:'فواتير إدارية مبسطة للمبيعات.',icon:'▦',fields:[['number','رقم الفاتورة','text',true],['customer','اسم العميل','text',true],['date','تاريخ الفاتورة','date',true],['amount','الإجمالي شامل الضريبة إن وجدت','number',true],['paid','المبلغ المدفوع','number',true],['status','الحالة','select',true,['مدفوعة','جزئية','غير مدفوعة']],['notes','وصف الأصناف / ملاحظات','textarea']]}
 };
-const navigation=[['dashboard','⌂','لوحة التحكم'],['employees','♙','الموظفون'],['customers','♧','العملاء'],['suppliers','▣','الموردون'],['products','▤','المخزون'],['invoices','▦','الفواتير'],['expenses','◈','المصروفات'],['tasks','☑','المهام'],['reports','▥','التقارير'],['settings','⚙','الإعدادات']];
+const navigation=[['dashboard','⌂','لوحة التحكم'],['employees','♙','الموظفون'],['customers','♧','العملاء'],['suppliers','▣','الموردون'],['products','▤','المخزون'],['invoices','▦','الفواتير'],['expenses','◈','المصروفات'],['tasks','☑','المهام'],['devices','▣','إدارة الأجهزة'],['reports','▥','التقارير'],['settings','⚙','الإعدادات']];
 function emptyState(){return {version:1,settings:{company:'مؤسستي',owner:'',phone:'',city:'',tax:''},employees:[],customers:[],suppliers:[],products:[],expenses:[],tasks:[],invoices:[]}}
 function validateState(v){if(!v||typeof v!=='object'||v.version!==1)throw Error('ملف النسخة الاحتياطية غير متوافق');const out=emptyState();out.settings={...out.settings,...(v.settings||{})};for(const k of Object.keys(schema)){if(!Array.isArray(v[k]))throw Error('ملف ناقص: '+k);out[k]=v[k].slice(0,50000).filter(x=>x&&typeof x==='object').map(x=>Object.fromEntries(Object.entries(x).filter(([key,val])=>['id','createdAt',...schema[k].fields.map(f=>f[0])].includes(key)&&['string','number'].includes(typeof val))))}return out}
-let db;try{db=validateState(JSON.parse(localStorage.getItem(KEY)||'null'))}catch(_){db=emptyState()}
+let db=emptyState();
+function loadAccountData(account){
+ const storeCode=String(account?.storeCode||'').trim();if(!storeCode)throw Error('حساب المتجر غير معروف');
+ KEY='milo-admin-v3-store-'+encodeURIComponent(storeCode);
+ try{db=validateState(JSON.parse(localStorage.getItem(KEY)||'null'))}catch(_){db=emptyState()}
+ if(account.storeName&&db.settings.company==='مؤسستي')db.settings.company=account.storeName;
+}
 let current='dashboard',searchTerm='',editing=null;
 const store=()=>{try{localStorage.setItem(KEY,JSON.stringify(db));return true}catch(e){toast('تعذر الحفظ: مساحة المتصفح ممتلئة');return false}};
 function toast(s){const t=$('#toast');t.textContent=s;t.classList.add('show');clearTimeout(window._toastTimer);window._toastTimer=setTimeout(()=>t.classList.remove('show'),2800)}
@@ -43,12 +50,12 @@ const search=$('#search');search.oninput=()=>{const q=search.value.toLowerCase()
 $('#exportCsv').onclick=()=>csvExport(k);document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>showModal(k,b.dataset.edit));document.querySelectorAll('[data-delete]').forEach(b=>b.onclick=()=>deleteRecord(k,b.dataset.delete));wireNew()}
 function reports(){const s=stats();setHead('التحليل','التقارير الإدارية','ملخص تحليلي من السجلات المسجلة في هذا المتصفح.',`<button class="btn ghost" id="reportPrint">⎙ طباعة التقرير</button>`);const monthData={};for(const r of db.invoices){const m=String(r.date||'').slice(0,7);if(m)monthData[m]=(monthData[m]||0)+Number(r.amount||0)}const months=Object.entries(monthData).sort(([a],[b])=>b.localeCompare(a)).slice(0,8);const max=Math.max(1,...months.map(x=>x[1]));const categories={};db.expenses.forEach(r=>categories[r.category||'أخرى']=(categories[r.category||'أخرى']||0)+Number(r.amount||0));const top=Object.entries(categories).sort((a,b)=>b[1]-a[1]);const maxExpense=Math.max(1,...top.map(x=>x[1]));
 $('#view').innerHTML=`<div class="cards">${kpi('▦','قيمة الفواتير',money(s.sales))}${kpi('◈','المصروفات',money(s.expenses))}${kpi('◉','مبالغ غير محصلة',money(s.receivables))}${kpi('☑','المهام المكتملة',num(db.tasks.filter(t=>t.status==='مكتملة').length))}</div><div class="grid2">${panel('فواتير بحسب الشهر',months.length?months.map(([m,v])=>`<div class="barrow"><span>${esc(m)}</span><div class="track"><div class="fill" style="width:${v/max*100}%"></div></div><b>${num(v)}</b></div>`).join(''):empty('لا توجد فواتير'))}${panel('المصروفات بحسب التصنيف',top.length?top.map(([m,v])=>`<div class="barrow"><span>${esc(m)}</span><div class="track"><div class="fill" style="width:${v/maxExpense*100}%"></div></div><b>${num(v)}</b></div>`).join(''):empty('لا توجد مصروفات'))}</div>${panel('تفاصيل تشغيلية',`<div class="summary"><div class="item"><small>إجمالي الموظفين</small><b>${num(db.employees.length)}</b></div><div class="item"><small>الموردون</small><b>${num(db.suppliers.length)}</b></div><div class="item"><small>المنتجات</small><b>${num(db.products.length)}</b></div><div class="item"><small>الوحدات بالمخزون</small><b>${num(s.stock)}</b></div><div class="item"><small>قيمة المخزون بالتكلفة</small><b>${money(db.products.reduce((n,p)=>n+Number(p.quantity||0)*Number(p.cost||0),0))}</b></div><div class="item"><small>مهام غير مكتملة</small><b>${num(db.tasks.filter(t=>t.status!=='مكتملة').length)}</b></div></div><div class="hintbox">التقارير مبسطة وغير معتمدة كمحاسبة قانونية، ولا تحسب ضريبة القيمة المضافة أو القيود المزدوجة تلقائيًا.</div>`)}`;$('#reportPrint').onclick=()=>window.print()}
-function settings(){setHead('التهيئة','إعدادات النظام','بيانات منشأتك والنسخ الاحتياطي.',`<button class="btn primary" id="saveSettings">✓ حفظ الإعدادات</button>`);const fields=[['company','اسم المنشأة'],['owner','اسم المدير'],['phone','رقم الجوال'],['city','المدينة'],['tax','الرقم الضريبي']];$('#view').innerHTML=`${panel('بيانات المنشأة',`<div class="settingsform">${fields.map(([k,l])=>`<div class="field"><label for="set_${k}">${l}</label><input id="set_${k}" value="${esc(db.settings[k]||'')}"></div>`).join('')}</div>`)}${panel('النسخ الاحتياطي والاستعادة',`<div class="hintbox">المعلومات تُخزن محليًا داخل المتصفح، ولن تُزامن تلقائيًا بين الأجهزة. احفظ النسخة الاحتياطية في مكان آمن، فقد تضيع البيانات عند مسح بيانات المتصفح.</div><div class="quickactions"><button id="backup" class="btn primary">↓ تحميل نسخة JSON</button><button id="restore" class="btn">↑ استعادة نسخة JSON</button><button id="clearAll" class="btn danger">حذف جميع البيانات</button></div>`)}${panel('حول النظام',`<p>ميلو للإدارة — إصدار 1.0، تطبيق إداري مستقل يعمل على HTML وCSS وJavaScript، ويمكن تشغيله محليًا أو عبر GitHub Pages.</p><p class="muted">هذا إصدار محلي فردي، لا يتضمن تسجيل دخول آمن أو صلاحيات متعددة أو قاعدة بيانات سحابية أو ربطًا تلقائيًا بنظام MILO CASHIER.</p>`)}`;
+function settings(){setHead('التهيئة','إعدادات النظام','بيانات منشأتك والنسخ الاحتياطي.',`<button class="btn primary" id="saveSettings">✓ حفظ الإعدادات</button>`);const fields=[['company','اسم المنشأة'],['owner','اسم المدير'],['phone','رقم الجوال'],['city','المدينة'],['tax','الرقم الضريبي']];$('#view').innerHTML=`${panel('بيانات المنشأة',`<div class="settingsform">${fields.map(([k,l])=>`<div class="field"><label for="set_${k}">${l}</label><input id="set_${k}" value="${esc(db.settings[k]||'')}"></div>`).join('')}</div>`)}${panel('النسخ الاحتياطي والاستعادة',`<div class="hintbox">المعلومات تُخزن محليًا داخل المتصفح، ولن تُزامن تلقائيًا بين الأجهزة. احفظ النسخة الاحتياطية في مكان آمن، فقد تضيع البيانات عند مسح بيانات المتصفح.</div><div class="quickactions"><button id="backup" class="btn primary">↓ تحميل نسخة JSON</button><button id="restore" class="btn">↑ استعادة نسخة JSON</button><button id="clearAll" class="btn danger">حذف جميع البيانات</button></div>`)}${panel('حول النظام',`<p>ميلو للإدارة — إصدار 1.0، تطبيق إداري مستقل يعمل على HTML وCSS وJavaScript، ويمكن تشغيله محليًا أو عبر GitHub Pages.</p><p class="muted">تسجيل الدخول وإدارة الأجهزة يعتمدان على خادم Apps Script المرفق. باقي الأقسام تحفظ بياناتها محليًا ولا تعتبر قاعدة بيانات سحابية؛ لا يوجد تحكم عن بعد بالأجهزة أو ربط تلقائي بنظام MILO CASHIER.</p>`)}`;
 $('#saveSettings').onclick=()=>{for(const [k] of fields)db.settings[k]=$('#set_'+k).value.trim();store();render();toast('تم حفظ الإعدادات')};$('#backup').onclick=backup;$('#restore').onclick=()=>$('#importFile').click();$('#clearAll').onclick=()=>{if(confirm('سيتم حذف جميع السجلات من هذا المتصفح. احفظ نسخة احتياطية أولًا. هل أنت متأكد؟')&&confirm('تأكيد نهائي: هل تريد مسح جميع البيانات؟')){db=emptyState();store();render();toast('تم حذف جميع البيانات')}}}
 function wireNew(){document.querySelectorAll('[data-new]').forEach(b=>b.onclick=()=>showModal(b.dataset.new))}
-function render(){renderNav();if(current==='dashboard')dashboard();else if(schema[current])moduleView(current);else if(current==='reports')reports();else if(current==='settings')settings()}
-function showModal(k,id=null){const conf=schema[k];if(!conf)return;editing={k,id};const r=db[k].find(v=>v.id===id)||{};$('#modalTag').textContent=conf.title;$('#modalTitle').textContent=id?'تعديل سجل':'إضافة سجل جديد';$('#modalFields').innerHTML=conf.fields.map(([key,label,type,req,opts])=>`<div class="field ${type==='textarea'?'wide':''}"><label for="f_${key}">${esc(label)}${req?' *':''}</label>${type==='select'?`<select id="f_${key}" name="${key}" ${req?'required':''}><option value="">اختر...</option>${opts.map(o=>`<option value="${esc(o)}" ${r[key]===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`:type==='textarea'?`<textarea id="f_${key}" name="${key}">${esc(r[key]||'')}</textarea>`:`<input id="f_${key}" name="${key}" type="${type}" ${type==='number'?'step="any" min="0"':''} ${req?'required':''} value="${esc(r[key]??(type==='date'?dateNow():''))}">`}</div>`).join('');$('#dialog').showModal()}
-$('#entityForm').addEventListener('submit',e=>{e.preventDefault();if(!editing)return;const {k,id}=editing;const f=new FormData(e.currentTarget);const r={id:id||uid(),createdAt: id?db[k].find(x=>x.id===id)?.createdAt||new Date().toISOString():new Date().toISOString()};for(const [key,,type] of schema[k].fields){const v=String(f.get(key)||'').trim();r[key]=type==='number'?Number(v||0):v}
+function render(){renderNav();if(current==='dashboard')dashboard();else if(schema[current])moduleView(current);else if(current==='devices')devicesView();else if(current==='reports')reports();else if(current==='settings')settings()}
+function showModal(k,id=null){$('#entityForm').onsubmit=null;const conf=schema[k];if(!conf)return;editing={k,id};const r=db[k].find(v=>v.id===id)||{};$('#modalTag').textContent=conf.title;$('#modalTitle').textContent=id?'تعديل سجل':'إضافة سجل جديد';$('#modalFields').innerHTML=conf.fields.map(([key,label,type,req,opts])=>`<div class="field ${type==='textarea'?'wide':''}"><label for="f_${key}">${esc(label)}${req?' *':''}</label>${type==='select'?`<select id="f_${key}" name="${key}" ${req?'required':''}><option value="">اختر...</option>${opts.map(o=>`<option value="${esc(o)}" ${r[key]===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`:type==='textarea'?`<textarea id="f_${key}" name="${key}">${esc(r[key]||'')}</textarea>`:`<input id="f_${key}" name="${key}" type="${type}" ${type==='number'?'step="any" min="0"':''} ${req?'required':''} value="${esc(r[key]??(type==='date'?dateNow():''))}">`}</div>`).join('');$('#dialog').showModal()}
+$('#entityForm').addEventListener('submit',e=>{if(current==='devices')return; e.preventDefault();if(!editing)return;const {k,id}=editing;const f=new FormData(e.currentTarget);const r={id:id||uid(),createdAt: id?db[k].find(x=>x.id===id)?.createdAt||new Date().toISOString():new Date().toISOString()};for(const [key,,type] of schema[k].fields){const v=String(f.get(key)||'').trim();r[key]=type==='number'?Number(v||0):v}
 if(k==='invoices' && Number(r.paid)>Number(r.amount)){toast('المدفوع لا يمكن أن يتجاوز إجمالي الفاتورة');return}
 if(id){const i=db[k].findIndex(x=>x.id===id);if(i>=0)db[k][i]=r}else db[k].unshift(r);store();$('#dialog').close();editing=null;render();toast(id?'تم تعديل السجل':'تمت إضافة السجل')});
 $('#cancelModal').onclick=$('#closeModal').onclick=()=>$('#dialog').close();
@@ -59,4 +66,55 @@ function csvExport(k){const fields=schema[k].fields;const rows=[fields.map(f=>f[
 $('#importFile').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{if(file.size>15*1024*1024)throw Error('الملف كبير جدًا');const next=validateState(JSON.parse(await file.text()));if(!confirm('ستستبدل الاستعادة جميع البيانات الحالية. هل تريد المتابعة؟'))return;db=next;store();render();toast('تمت استعادة النسخة الاحتياطية')}catch(err){toast('تعذر الاستعادة: '+err.message)}finally{e.target.value=''}};
 $('#backupQuick').onclick=backup;$('#menu').onclick=()=>$('#sidebar').classList.toggle('open');$('#today').textContent=new Intl.DateTimeFormat('ar-SA',{weekday:'long',day:'numeric',month:'long',year:'numeric'}).format(new Date());
 window.addEventListener('hashchange',()=>{const id=location.hash.slice(1);if(id!==current && navigation.some(x=>x[0]===id))navigate(id)});current=navigation.some(x=>x[0]===location.hash.slice(1))?location.hash.slice(1):'dashboard';render();
+initAdminAuth();
 if('serviceWorker' in navigator && (location.protocol==='https:'||location.hostname==='localhost'))window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+
+// --- Authenticated gateway and device inventory ---
+let deviceRows=[], deviceBusy=false;
+const deviceFieldKeys=['name','code','branch','assigned','type','notes'];
+function setLoginError(message){$('#loginError').textContent=message||''}
+function unlockApp(account){loadAccountData(account);$('#loginGate').hidden=true;$('#app').hidden=false;render(); }
+function lockApp(){ $('#app').hidden=true;$('#loginGate').hidden=false;$('#password').value='';db=emptyState();KEY='';deviceRows=[];$('#username').focus(); }
+async function initAdminAuth(){
+  lockApp();
+  $('#loginForm').addEventListener('submit',async event=>{
+    event.preventDefault(); const btn=$('#loginBtn');btn.disabled=true;setLoginError('جاري التحقق من بيانات الدخول...');
+    try{const account=await window.MiloAdminAPI.login($('#username').value.trim(),$('#password').value);setLoginError('');$('#password').value='';unlockApp(account);}
+    catch(e){setLoginError(e.message||'تعذر تسجيل الدخول');}
+    finally{btn.disabled=false;}
+  });
+  $('#logoutBtn').onclick=async()=>{await window.MiloAdminAPI.logout().catch(()=>{});lockApp();toast('تم تسجيل الخروج')};
+  if(window.MiloAdminAPI.hasSession()){
+    try{const account=await window.MiloAdminAPI.check();unlockApp(account);}catch(_){lockApp();}
+  }
+}
+async function devicesView(){
+ setHead('الأنظمة / الأجهزة','إدارة الأجهزة','متابعة سجل الأجهزة والفروع والأجهزة المعتمدة.',`<button class="btn primary" id="newDevice">＋ إضافة جهاز</button>`);
+ $('#view').innerHTML=`<div class="hintbox">تُحفظ الأجهزة على Google Sheets عبر Apps Script. الحالة المسجلة إدارية وليست حالة اتصال حية، ولا يتضمن النظام حتى الآن تعطيلًا فعليًا أو تحكمًا عن بُعد.</div><div class="toolbar"><div class="right"><input id="deviceSearch" class="search" placeholder="البحث باسم الجهاز أو الفرع أو الرمز"><button id="refreshDevices" class="btn">⟳ تحديث</button></div><span class="pill" id="deviceCount">—</span></div><div id="deviceResults" class="panel">جاري تحميل الأجهزة...</div>`;
+ $('#newDevice').onclick=()=>deviceEditor();$('#refreshDevices').onclick=loadDevices;$('#deviceSearch').oninput=drawDeviceRows;
+ await loadDevices();
+}
+async function loadDevices(){
+ if(deviceBusy)return;deviceBusy=true;
+ try{const r=await window.MiloAdminAPI.call('listDevices',{});deviceRows=Array.isArray(r.devices)?r.devices:[];drawDeviceRows();}
+ catch(e){if(current==='devices')$('#deviceResults').innerHTML=`<div class="notice">${esc(e.message||'تعذر تحميل الأجهزة')}</div>`;if(e.code==='SESSION_EXPIRED'){lockApp()}}
+ finally{deviceBusy=false;}
+}
+function drawDeviceRows(){if(current!=='devices')return;const q=($('#deviceSearch')?.value||'').trim().toLowerCase();const rows=deviceRows.filter(r=>[r.name,r.code,r.branch,r.assigned,r.type].some(v=>String(v||'').toLowerCase().includes(q)));$('#deviceCount').textContent=`${num(rows.length)} جهاز`;
+ $('#deviceResults').innerHTML=rows.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>الجهاز</th><th>الرمز</th><th>الفرع</th><th>المسؤول</th><th>النوع</th><th>الحالة الإدارية</th><th>آخر تعديل</th><th>إجراءات</th></tr></thead><tbody>${rows.map(r=>`<tr><td><b>${esc(r.name)}</b></td><td>${esc(r.code)}</td><td>${esc(r.branch)}</td><td>${esc(r.assigned)}</td><td>${esc(r.type)}</td><td>${esc(r.status)}</td><td>${esc(r.updatedAt||'')}</td><td><div class="rowactions"><button class="btn tinybtn" data-device-edit="${esc(r.id)}">تعديل</button><button class="btn tinybtn danger" data-device-delete="${esc(r.id)}">حذف</button></div></td></tr>`).join('')}</tbody></table></div>`:empty('لا توجد أجهزة مسجلة');
+ document.querySelectorAll('[data-device-edit]').forEach(b=>b.onclick=()=>deviceEditor(deviceRows.find(r=>r.id===b.dataset.deviceEdit)));
+ document.querySelectorAll('[data-device-delete]').forEach(b=>b.onclick=()=>removeDevice(b.dataset.deviceDelete));
+}
+function deviceEditor(r={}){
+ const keys=[['name','اسم الجهاز *'],['code','رقم الجهاز / المعرف *'],['branch','الفرع'],['assigned','الموظف المسؤول'],['type','نوع الجهاز'],['notes','ملاحظات']];
+ $('#modalTag').textContent='إدارة الأجهزة';$('#modalTitle').textContent=r.id?'تعديل جهاز':'تسجيل جهاز جديد';
+ $('#modalFields').innerHTML=keys.map(([k,label])=>`<div class="field"><label for="dev_${k}">${label}</label><input id="dev_${k}" maxlength="200" ${['name','code'].includes(k)?'required':''} value="${esc(r[k]||'')}"></div>`).join('')+`<div class="field"><label for="dev_status">الحالة الإدارية</label><select id="dev_status">${['نشط','صيانة','موقوف','غير مستخدم'].map(x=>`<option ${x===(r.status||'نشط')?'selected':''}>${x}</option>`).join('')}</select></div>`;
+ $('#dialog').showModal();
+ $('#entityForm').onsubmit=async e=>{
+  e.preventDefault();const device={id:r.id||'',status:$('#dev_status').value};for(const [k] of keys)device[k]=$('#dev_'+k).value.trim();
+  if(!device.name||!device.code){toast('اسم الجهاز ورمزه مطلوبان');return}
+  try{await window.MiloAdminAPI.call('saveDevice',{device});$('#dialog').close();$('#entityForm').onsubmit=null;toast('تم حفظ الجهاز');loadDevices();}
+  catch(err){toast(err.message||'تعذر الحفظ');}
+ };
+}
+async function removeDevice(id){if(!confirm('حذف الجهاز من السجل الإداري؟ لا يؤدي هذا إلى تعطيل جهاز الكاشير فعليًا.'))return;try{await window.MiloAdminAPI.call('deleteDevice',{id});toast('تم حذف الجهاز');await loadDevices()}catch(e){toast(e.message)}}
